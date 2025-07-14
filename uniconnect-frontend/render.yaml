@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: server
+    env: node
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: PORT
+        value: 5000
+    plan: free
+    branch: main
+    rootDir: backend
+
+  - type: web
+    name: uniconnect-frontend
+    env: static
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    branch: main
+    rootDir: frontend
+
