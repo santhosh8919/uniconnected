@@ -1,137 +1,304 @@
-const express = require('express');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const User = require('../models/User');
+const express = require("express");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const { body } = require("express-validator");
+const User = require("../models/User");
+const validate = require("../middleware/validation");
+const { auth } = require("../middleware/auth");
+
 const router = express.Router();
 
-// Middleware to verify JWT and get user
-function authMiddleware(req, res, next) {
-  const token = req.headers.authorization?.split(' ')[1];
-  if (!token) return res.status(401).json({ message: 'No token, authorization denied' });
+// Validation rules
+const registerValidation = [
+  body("fullName")
+    .trim()
+    .isLength({ min: 2, max: 100 })
+    .withMessage("Full name must be between 2 and 100 characters"),
+  body("email")
+    .isEmail()
+    .normalizeEmail()
+    .withMessage("Please provide a valid email"),
+  body("password")
+    .isLength({ min: 6 })
+    .withMessage("Password must be at least 6 characters long"),
+  body("college").trim().notEmpty().withMessage("College is required"),
+  body("branch").trim().notEmpty().withMessage("Branch is required"),
+  body("year")
+    .isIn(["1st Year", "2nd Year", "3rd Year", "4th Year", "Alumni"])
+    .withMessage("Invalid year selection"),
+  body("isWorking")
+    .optional()
+    .isBoolean()
+    .withMessage("isWorking must be a boolean"),
+  body("companyName")
+    .optional()
+    .trim()
+    .custom((value, { req }) => {
+      if (req.body.year === "Alumni" && req.body.isWorking === true) {
+        if (!value || value.trim() === "") {
+          throw new Error("Company name is required for working alumni");
+        }
+      }
+      return true;
+    }),
+  body("jobRole")
+    .optional()
+    .trim()
+    .custom((value, { req }) => {
+      if (req.body.year === "Alumni" && req.body.isWorking === true) {
+        if (!value || value.trim() === "") {
+          throw new Error("Job role is required for working alumni");
+        }
+      }
+      return true;
+    }),
+];
+
+const loginValidation = [
+  body("email")
+    .isEmail()
+    .normalizeEmail()
+    .withMessage("Please provide a valid email"),
+  body("password").notEmpty().withMessage("Password is required"),
+];
+
+// Generate JWT token
+const generateToken = (userId) => {
+  return jwt.sign({ userId }, process.env.JWT_SECRET, { expiresIn: "7d" });
+};
+
+// @route   POST /api/auth/register
+// @desc    Register a new user
+// @access  Public
+router.post("/register", registerValidation, validate, async (req, res) => {
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = decoded;
-    next();
-  } catch (err) {
-    res.status(401).json({ message: 'Token is not valid' });
-  }
-}
-
-// Get current user profile
-router.get('/profile', authMiddleware, async (req, res) => {
-  try {
-    const user = await User.findById(req.user.id).select('-password');
-    if (!user) return res.status(404).json({ message: 'User not found' });
-    res.json(user);
-  } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
-  }
-});
-
-// Update profile image
-router.put('/profile/image', authMiddleware, async (req, res) => {
-  try {
-    const { image } = req.body;
-    const user = await User.findByIdAndUpdate(
-      req.user.id,
-      { image },
-      { new: true }
-    ).select('-password');
-    res.json(user);
-  } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
-  }
-});
-
-router.post('/register', async (req, res) => {
-  try {
-    const { fullName, email, password, college, branch, year, isWorking, company } = req.body;
-
-    const existingUser = await User.findOne({ email });
-    if (existingUser) return res.status(400).json({ message: 'User already exists' });
-
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    // Determine role based on year
-    let role = 'alumni';
-    if (["1st", "2nd", "3rd", "4th"].includes(year)) {
-      role = 'student';
-    }
-
-    const user = new User({
+    const {
       fullName,
       email,
-      password: hashedPassword,
+      password,
       college,
       branch,
       year,
       isWorking,
-      company,
-      role
-    });
+      companyName,
+      jobRole,
+    } = req.body;
 
+    // Check if user already exists
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(400).json({
+        message: "User already exists with this email",
+      });
+    }
+
+    // Create user object
+    const userData = {
+      fullName,
+      email,
+      password,
+      college,
+      branch,
+      year,
+    };
+
+    // Add alumni-specific fields if applicable
+    if (year === "Alumni") {
+      userData.isWorking = isWorking || false;
+      if (isWorking) {
+        userData.companyName = companyName;
+        userData.jobRole = jobRole;
+      }
+    }
+
+    // Create new user
+    const user = new User(userData);
     await user.save();
-    res.status(201).json({ message: 'User registered successfully' });
-  } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
+
+    // Generate token
+    const token = generateToken(user._id);
+
+    // Update last login
+    user.lastLogin = new Date();
+    await user.save();
+
+    // Return response without password
+    const userResponse = user.getPublicProfile();
+
+    res.status(201).json({
+      message: "User registered successfully",
+      token,
+      user: userResponse,
+    });
+  } catch (error) {
+    console.error("Registration error:", error);
+
+    if (error.code === 11000) {
+      return res.status(400).json({
+        message: "Email already exists",
+      });
+    }
+
+    res.status(500).json({
+      message: "Server error during registration",
+      error: process.env.NODE_ENV === "development" ? error.message : undefined,
+    });
   }
 });
 
-router.post('/login', async (req, res) => {
+// @route   POST /api/auth/login
+// @desc    Login user
+// @access  Public
+router.post("/login", loginValidation, validate, async (req, res) => {
   try {
     const { email, password } = req.body;
-    console.log('Login attempt:', email);
-    const user = await User.findOne({ email });
+
+    // Find user and include password for comparison
+    const user = await User.findOne({ email }).select("+password");
+
     if (!user) {
-      console.log('User not found');
-      return res.status(400).json({ message: 'Invalid credentials' });
+      return res.status(400).json({
+        message: "Invalid email or password",
+      });
     }
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) {
-      console.log('Password mismatch');
-      return res.status(400).json({ message: 'Invalid credentials' });
+
+    if (!user.isActive) {
+      return res.status(400).json({
+        message: "Account is deactivated. Please contact support.",
+      });
     }
-    const payload = { id: user._id, year: user.year, email: user.email };
-    const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '1d' });
-    res.json({ token, user: payload });
-  } catch (err) {
-    console.error('Login error:', err);
-    res.status(500).json({ message: 'Server error', error: err.message });
+
+    // Check password
+    const isPasswordValid = await user.comparePassword(password);
+
+    if (!isPasswordValid) {
+      return res.status(400).json({
+        message: "Invalid email or password",
+      });
+    }
+
+    // Generate token
+    const token = generateToken(user._id);
+
+    // Update last login
+    user.lastLogin = new Date();
+    await user.save();
+
+    // Return response without password
+    const userResponse = user.getPublicProfile();
+
+    res.json({
+      message: "Login successful",
+      token,
+      user: userResponse,
+    });
+  } catch (error) {
+    console.error("Login error:", error);
+    res.status(500).json({
+      message: "Server error during login",
+      error: process.env.NODE_ENV === "development" ? error.message : undefined,
+    });
   }
 });
 
-// Search users by branch and year (excluding self)
-router.get('/search', authMiddleware, async (req, res) => {
+// @route   GET /api/auth/me
+// @desc    Get current user
+// @access  Private
+router.get("/me", auth, async (req, res) => {
   try {
-    const { branch, year } = req.query;
-    const query = {
-      _id: { $ne: req.user.id }
-    };
-    if (branch) query.branch = branch;
-    if (year) query.year = year;
-    const users = await User.find(query).select('fullName email branch year image');
-    res.json(users);
-  } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
-  }
-});
+    const user = await User.findById(req.user._id).select("-password");
 
-// Send connect request
-router.post('/connect/:id', authMiddleware, async (req, res) => {
-  try {
-    const targetUser = await User.findById(req.params.id);
-    if (!targetUser) return res.status(404).json({ message: 'User not found' });
-
-    // Add request to target user's requests array
-    if (!targetUser.requests.includes(req.user.id)) {
-      targetUser.requests.push(req.user.id);
-      targetUser.notifications.push(`You have a new connection request from user ${req.user.id}`);
-      await targetUser.save();
+    if (!user) {
+      return res.status(404).json({
+        message: "User not found",
+      });
     }
-    res.json({ message: 'Request sent' });
-  } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
+
+    res.json({
+      user: user.getPublicProfile(),
+    });
+  } catch (error) {
+    console.error("Get current user error:", error);
+    res.status(500).json({
+      message: "Server error",
+      error: process.env.NODE_ENV === "development" ? error.message : undefined,
+    });
   }
 });
+
+// @route   POST /api/auth/logout
+// @desc    Logout user (client-side token removal)
+// @access  Private
+router.post("/logout", auth, async (req, res) => {
+  try {
+    // In a JWT implementation, logout is typically handled client-side
+    // by removing the token. Here we could add token to a blacklist
+    // or update user's last activity
+
+    res.json({
+      message: "Logged out successfully",
+    });
+  } catch (error) {
+    console.error("Logout error:", error);
+    res.status(500).json({
+      message: "Server error during logout",
+    });
+  }
+});
+
+// @route   PUT /api/auth/change-password
+// @desc    Change user password
+// @access  Private
+router.put(
+  "/change-password",
+  [
+    auth,
+    body("currentPassword")
+      .notEmpty()
+      .withMessage("Current password is required"),
+    body("newPassword")
+      .isLength({ min: 6 })
+      .withMessage("New password must be at least 6 characters long"),
+  ],
+  validate,
+  async (req, res) => {
+    try {
+      const { currentPassword, newPassword } = req.body;
+
+      // Get user with password
+      const user = await User.findById(req.user._id).select("+password");
+
+      if (!user) {
+        return res.status(404).json({
+          message: "User not found",
+        });
+      }
+
+      // Verify current password
+      const isCurrentPasswordValid = await user.comparePassword(
+        currentPassword
+      );
+
+      if (!isCurrentPasswordValid) {
+        return res.status(400).json({
+          message: "Current password is incorrect",
+        });
+      }
+
+      // Update password
+      user.password = newPassword;
+      await user.save();
+
+      res.json({
+        message: "Password changed successfully",
+      });
+    } catch (error) {
+      console.error("Change password error:", error);
+      res.status(500).json({
+        message: "Server error during password change",
+      });
+    }
+  }
+);
 
 module.exports = router;
