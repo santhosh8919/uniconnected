@@ -37,7 +37,7 @@ app.use(
       // Allow requests with no origin (like mobile apps or curl requests)
       if (!origin) return callback(null, true);
 
-      const allowedOrigins = [
+      let allowedOrigins = [
         "http://localhost:5173",
         "http://localhost:3000",
         "http://127.0.0.1:5173",
@@ -45,14 +45,25 @@ app.use(
       ];
 
       if (process.env.NODE_ENV === "production") {
-        allowedOrigins = ["https://your-frontend-domain.com"];
+        // Add your actual frontend URL here
+        allowedOrigins = [
+          "https://uniconnect-frontend-7idj.onrender.com",
+          "https://uniconnect-frontend.onrender.com",
+          "https://uniconnected-frontend.onrender.com",
+          // Add any other production domains you might use
+        ];
       }
 
       if (allowedOrigins.indexOf(origin) !== -1) {
         callback(null, true);
       } else {
         console.log(`🚫 CORS blocked origin: ${origin}`);
-        callback(new Error("Not allowed by CORS"));
+        // In development, be more permissive
+        if (process.env.NODE_ENV !== "production") {
+          callback(null, true);
+        } else {
+          callback(new Error("Not allowed by CORS"));
+        }
       }
     },
     credentials: true,

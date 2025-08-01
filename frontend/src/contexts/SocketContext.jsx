@@ -46,15 +46,18 @@ export const SocketProvider = ({ children }) => {
 
       console.log("🔑 Connecting with token:", token);
 
-      const newSocket = io("http://localhost:5000", {
-        auth: {
-          token: token,
-        },
-        autoConnect: true,
-        transports: ["websocket", "polling"],
-        reconnectionDelayMax: 10000,
-        reconnectionAttempts: 10,
-      });
+      const newSocket = io(
+        import.meta.env.VITE_SOCKET_URL || "http://localhost:5000",
+        {
+          auth: {
+            token: token,
+          },
+          autoConnect: true,
+          transports: ["websocket", "polling"],
+          reconnectionDelayMax: 10000,
+          reconnectionAttempts: 10,
+        }
+      );
 
       newSocket.on("connect", () => {
         console.log("✅ Connected to Socket.IO server");
